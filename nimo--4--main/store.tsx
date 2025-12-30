@@ -123,6 +123,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const activeCallDataRef = useRef(activeCallData);
   const localStreamRef = useRef(localStream);
   const usersRef = useRef(users);
+  // Remember whether camera was on before initiating a screenshare so we can restore it afterwards
+  const cameraWasOnBeforeScreenShareRef = useRef<boolean>(false);
 
   // Map of ChatID -> Timestamp when current user last read it
   const [lastReadTimestamps, setLastReadTimestamps] = useState<Record<string, number>>({});
@@ -953,7 +955,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // Add this new track to all Peer Connections
         for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
           const transceivers = pc.getTransceivers();
-          const audioTransceiver = transceivers.find(t => t.receiver.track.kind === 'audio');
+          const audioTransceiver = transceivers.find(t => (t.receiver && t.receiver.track && t.receiver.track.kind === 'audio') || (t.sender && t.sender.track && t.sender.track.kind === 'audio'));
 
           if (audioTransceiver && audioTransceiver.sender) {
             await audioTransceiver.sender.replaceTrack(newTrack);
@@ -1005,7 +1007,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // Update peers: replace video track with null (stop sending video)
       for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
         const transceivers = pc.getTransceivers();
-        const videoTransceiver = transceivers.find(t => t.receiver.track.kind === 'video');
+        const videoTransceiver = transceivers.find(t => (t.receiver && t.receiver.track && t.receiver.track.kind === 'video') || (t.sender && t.sender.track && t.sender.track.kind === 'video'));
         if (videoTransceiver && videoTransceiver.sender) {
           videoTransceiver.sender.replaceTrack(null);
         }
@@ -1030,7 +1032,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // Update peers
         for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
           const transceivers = pc.getTransceivers();
-          const videoTransceiver = transceivers.find(t => t.receiver.track.kind === 'video');
+          const videoTransceiver = transceivers.find(t => (t.receiver && t.receiver.track && t.receiver.track.kind === 'video') || (t.sender && t.sender.track && t.sender.track.kind === 'video'));
 
           if (videoTransceiver && videoTransceiver.sender) {
             await videoTransceiver.sender.replaceTrack(videoTrack);
@@ -1205,24 +1207,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       });
 
-      setIsScreenSharing(false);
-      setIsCameraOn(false);
+      // Remember whether camera was on before share (reset after handling)
+      const wasCameraOn = cameraWasOnBeforeScreenShareRef.current;
+      cameraWasOnBeforeScreenShareRef.current = false;
 
-      const replacePromises = [];
+      // Attempt to restore camera if it was on previously
+      let restoredCamTrack: MediaStreamTrack | null = null;
+      if (wasCameraOn) {
+        try {
+          const camStream = await navigator.mediaDevices.getUserMedia({ video: true });
+          restoredCamTrack = camStream.getVideoTracks()[0];
+          // ensure local stream receives it for local preview
+          stream.addTrack(restoredCamTrack);
+        } catch (e) {
+          console.warn('Could not restore camera after screen share stop:', e);
+          restoredCamTrack = null;
+        }
+      }
+
+      setIsScreenSharing(false);
+      setIsCameraOn(!!restoredCamTrack);
+
+      const replacePromises: Promise<any>[] = [];
 
       for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
         const transceivers = pc.getTransceivers();
 
-        // 3. Clear Video Sender
-        const videoTransceiver = transceivers.find(t => t.receiver.track.kind === 'video');
+        // 3. Replace video sender with restored camera track or clear it
+        const videoTransceiver = transceivers.find(t => (t.receiver && t.receiver.track && t.receiver.track.kind === 'video') || (t.sender && t.sender.track && t.sender.track.kind === 'video'));
         if (videoTransceiver && videoTransceiver.sender) {
-          replacePromises.push(videoTransceiver.sender.replaceTrack(null));
+          replacePromises.push(videoTransceiver.sender.replaceTrack(restoredCamTrack));
         }
 
         // 4. Force Re-attach Audio Sender (The Fix)
-        // This ensures the audio sender is explicitly pointing to our live audio track.
-        // Even if it was already attached, this operation is safe and confirms the link.
-        const audioTransceiver = transceivers.find(t => t.receiver.track.kind === 'audio');
+        const audioTransceiver = transceivers.find(t => (t.receiver && t.receiver.track && t.receiver.track.kind === 'audio') || (t.sender && t.sender.track && t.sender.track.kind === 'audio'));
         if (audioTransceiver && audioTransceiver.sender && audioTrack) {
           replacePromises.push(audioTransceiver.sender.replaceTrack(audioTrack));
         }
@@ -1231,9 +1249,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await Promise.all(replacePromises);
 
       // 5. Update Local Stream State
-      // We create a new object to trigger React updates, but it contains the SAME audio track 
-      // that we just confirmed is attached to the sender.
-      const newStream = new MediaStream(audioTrack ? [audioTrack] : []);
+      const newTracks = [] as MediaStreamTrack[];
+      if (audioTrack) newTracks.push(audioTrack);
+      if (restoredCamTrack) newTracks.push(restoredCamTrack);
+      const newStream = new MediaStream(newTracks);
       setLocalStream(newStream);
       localStreamRef.current = newStream;
 
@@ -1267,7 +1286,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           (screenTrack as any).contentHint = 'detail';
         }
 
-        // If camera is on, stop it first (mutually exclusive video track for simplicity)
+        // If camera is on, remember and stop it first (mutually exclusive video track for simplicity)
+        cameraWasOnBeforeScreenShareRef.current = isCameraOn;
         if (isCameraOn) {
           stream.getVideoTracks().forEach(t => { t.stop(); stream.removeTrack(t); });
           setIsCameraOn(false);
@@ -1285,7 +1305,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const replacePromises = [];
         for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
           const transceivers = pc.getTransceivers();
-          const videoTransceiver = transceivers.find(t => t.receiver.track.kind === 'video');
+          const videoTransceiver = transceivers.find(t => (t.receiver && t.receiver.track && t.receiver.track.kind === 'video') || (t.sender && t.sender.track && t.sender.track.kind === 'video'));
 
           if (videoTransceiver && videoTransceiver.sender) {
             videoTransceiver.direction = 'sendrecv';
