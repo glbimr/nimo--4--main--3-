@@ -134,8 +134,12 @@ export const Communication: React.FC = () => {
               return att;
             }
 
-            const { data: { publicUrl } } = supabase.storage.from('attachments').getPublicUrl(fileName);
-            return { ...att, url: publicUrl };
+            // Create signed URL for private buckets; fall back to public URL
+            const signed = await supabase.storage.from('attachments').createSignedUrl(fileName, 60 * 60).catch(() => null);
+            const publicData = await supabase.storage.from('attachments').getPublicUrl(fileName).catch(() => null);
+
+            const finalUrl = signed && (signed as any).data?.signedUrl ? (signed as any).data.signedUrl : (publicData as any)?.data?.publicUrl;
+            return { ...att, url: finalUrl || att.url };
           } catch (err) {
             console.error('File processing error:', err);
             return att;

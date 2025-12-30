@@ -651,14 +651,18 @@ const TaskEditor: React.FC<{
             continue;
           }
 
-          const { data } = supabase.storage.from('attachments').getPublicUrl(fileName);
+          // Try to create a signed URL (works if bucket is private). Fall back to public URL.
+          const signed = await supabase.storage.from('attachments').createSignedUrl(fileName, 60 * 60).catch(() => null);
+          const publicData = supabase.storage.from('attachments').getPublicUrl(fileName).catch(() => null);
+
+          const url = signed && (signed as any).data?.signedUrl ? (signed as any).data.signedUrl : (publicData as any)?.data?.publicUrl;
 
           newAttachments.push({
             id: Date.now().toString() + Math.random(),
             name: file.name,
             size: (file.size / 1024).toFixed(1) + ' KB',
             type: file.type,
-            url: data.publicUrl
+            url: url || ''
           });
         } catch (err) {
           console.error('Error processing task attachment:', err);
@@ -1209,14 +1213,18 @@ const SubtaskEditor: React.FC<{
             continue;
           }
 
-          const { data } = supabase.storage.from('attachments').getPublicUrl(fileName);
+          // Try to create a signed URL (works if bucket is private). Fall back to public URL.
+          const signed = await supabase.storage.from('attachments').createSignedUrl(fileName, 60 * 60).catch(() => null);
+          const publicData = await supabase.storage.from('attachments').getPublicUrl(fileName).catch(() => null);
+
+          const url = signed && (signed as any).data?.signedUrl ? (signed as any).data.signedUrl : (publicData as any)?.data?.publicUrl;
 
           newAttachments.push({
             id: Date.now().toString() + Math.random(),
             name: file.name,
             size: (file.size / 1024).toFixed(1) + ' KB',
             type: file.type,
-            url: data.publicUrl
+            url: url || ''
           });
         } catch (err) {
           console.error('Error processing subtask attachment:', err);
